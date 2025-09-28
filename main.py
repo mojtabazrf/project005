@@ -7,6 +7,7 @@ from email.mime.multipart import MIMEMultipart
 import uvicorn
 import os
 from dotenv import load_dotenv
+import openai
 
 # ---------------- بارگذاری متغیرهای محیطی ----------------
 load_dotenv()
@@ -18,6 +19,13 @@ MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
 MAIL_FROM = os.getenv("MAIL_FROM_ADDRESS")
 PURCHASE_MANAGER_EMAIL = os.getenv("PURCHASE_MANAGER_EMAIL")
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+
+# تنظیم OpenAI
+openai.api_key = OPENAI_API_KEY
+openai.api_base = OPENAI_BASE_URL
+
 # ---------------- Google Sheets ----------------
 JSON_FILE = "agent-project-473411-c4c269e52211.json"
 SHEET_ID = "1JO71SG-BX6TvwLPnKQCHOJn1ADZ46C4eSc4n951r5Qs"
@@ -25,12 +33,10 @@ SHEET_ID = "1JO71SG-BX6TvwLPnKQCHOJn1ADZ46C4eSc4n951r5Qs"
 # ---------------- FastAPI ----------------
 app = FastAPI()
 
-# آیتم‌هایی که نیاز به سفارش دارند (حافظه موقت)
 pending_items = []
 
-
+# ---------------- توابع ----------------
 def read_items_from_sheet():
-    """خواندن آیتم‌ها از Google Sheets"""
     global pending_items
     scope = ["https://spreadsheets.google.com/feeds",
              "https://www.googleapis.com/auth/drive"]
@@ -51,7 +57,6 @@ def read_items_from_sheet():
 
 
 def send_email(to_email, subject, body):
-    """ارسال ایمیل"""
     msg = MIMEMultipart()
     msg["From"] = MAIL_FROM
     msg["To"] = to_email
@@ -60,13 +65,32 @@ def send_email(to_email, subject, body):
 
     with smtplib.SMTP_SSL(MAIL_HOST, MAIL_PORT) as server:
         server.set_debuglevel(1)
-        #server.starttls()
         server.login(MAIL_USER, MAIL_PASSWORD)
         server.sendmail(MAIL_FROM, to_email, msg.as_string())
 
 
+def generate_supplier_email(item):
+    """ساخت متن ایمیل با استفاده از ChatGPT"""
+    prompt = f"""
+    لطفا یک ایمیل رسمی و حرفه‌ای به تأمین‌کننده بنویس که شامل اطلاعات زیر باشد:
+    نام تأمین‌کننده: {item['supplier_name']}
+    کالا: {item['item_name']}
+    SKU: {item['item_sku']}
+    موجودی فعلی: {item['on_hand_qty']}
+    آستانه سفارش: {item['reorder_threshold']}
+    مقدار سفارش پیشنهادی: {item['order_qty']}
+    متن باید کوتاه، دوستانه و حرفه‌ای باشد و به صورت HTML قابل نمایش باشد.
+    """
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=250
+    )
+    return response.choices[0].message.content.strip()
+
+
 def notify_user():
-    """ارسال ایمیل اولیه به کاربر برای تایید یا رد"""
     if not pending_items:
         return
 
@@ -76,8 +100,8 @@ def notify_user():
          for item in pending_items]
     )
 
-    approve_link = "http://127.0.0.1:8000/approve?decision=yes"
-    reject_link = "http://127.0.0.1:8000/approve?decision=no"
+    approve_link = "http://127.0.0.1:9000/approve?decision=yes"
+    reject_link = "http://127.0.0.1:9000/approve?decision=no"
 
     body = f"""
     <p>لیست آیتم‌هایی که نیاز به سفارش دارند:</p>
@@ -91,25 +115,15 @@ def notify_user():
 
 
 def notify_suppliers():
-    """ارسال ایمیل به تأمین‌کنندگان بعد از تایید کاربر"""
     for item in pending_items:
         subject = f"سفارش خرید: {item['item_name']}"
-        body = (
-            f"سلام {item['supplier_name']},<br><br>"
-            f"لطفاً سفارش زیر ثبت گردد:<br><br>"
-            f"کالا: {item['item_name']} (SKU: {item['item_sku']})<br>"
-            f"موجودی فعلی: {item['on_hand_qty']}<br>"
-            f"آستانه سفارش: {item['reorder_threshold']}<br>"
-            f"مقدار سفارش پیشنهادی: {item['order_qty']}<br><br>"
-            f"با تشکر."
-        )
+        body = generate_supplier_email(item)  # تولید متن توسط ChatGPT
         send_email(item["supplier_email"], subject, body)
 
 
 # ---------------- FastAPI Endpoints ----------------
 @app.get("/start")
 def start_process():
-    """شروع فرآیند: خواندن آیتم‌ها و ارسال ایمیل به کاربر"""
     read_items_from_sheet()
     if pending_items:
         notify_user()
@@ -120,7 +134,6 @@ def start_process():
 
 @app.get("/approve")
 def approve_order(decision: str):
-    """کاربر تصمیم می‌گیرد"""
     if decision == "yes":
         notify_suppliers()
         return {"message": "✅ سفارش تایید شد و ایمیل به تامین‌کنندگان ارسال شد."}
@@ -130,4 +143,4 @@ def approve_order(decision: str):
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=9000)
